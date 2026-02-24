@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>物理マージパズル</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #f0f0f0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Arial', sans-serif;
+            overflow: hidden;
+            touch-action: none;
+        }
+        #game-container {
+            position: relative;
+            width: 360px;
+            height: 600px;
+            background-color: #fffaf0;
+            box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        canvas {
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        #score-display {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 24px;
+            font-weight: bold;
+            color: #555;
+        }
+        #next-container {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            text-align: center;
+        }
+        #next-label {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 5px;
+        }
+        #next-canvas {
+            background-color: rgba(255,255,255,0.5);
+            border-radius: 50%;
+        }
+        #game-over {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: white;
+            z-index: 100;
+        }
+        #game-over h1 {
+            font-size: 48px;
+            margin: 0;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+        }
+        #final-score {
+            font-size: 32px;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <div id="ui-layer">
+        <div id="score-display">Score: 0</div>
+        <div id="next-container">
+            <div id="next-label">Next</div>
+            <canvas id="next-canvas" width="80" height="80"></canvas>
+        </div>
+    </div>
+    <div id="game-over">
+        <h1>GAME OVER</h1>
+        <div id="final-score">Score: 0</div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<script>
+    const { Engine, Render, Runner, Bodies, Composite, Events, World, Body } = Matter;
+
+    // ゲーム設定
+    const WIDTH = 360;
+    const HEIGHT = 600;
+    const LIMIT_LINE_Y = 150;
+    const COOLDOWN = 1000;
+
+    // 玉の種類定義
+    const BALL_TYPES = [
+        { name: 'チェリー', radius: 15, color: '#ff4d4d', score: 1 },
+        { name: 'イチゴ', radius: 25, color: '#ff8c1a', score: 3 },
+        { name: 'ブドウ', radius: 35, color: '#a366ff', score: 6 },
+        { name: 'ミカン', radius: 45, color: '#ffcc00', score: 10 },
+        { name: 'スイカ', radius: 65, color: '#4dff4d', score: 20 }
+    ];
+
+    // Sound effects using Web Audio API
+    let audioCtx = null;
+
+    function initAudio() {
+        if (audioCtx) return;
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    function playDropSound() {
+        if (!audioCtx) initAudio();
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(150, audioCtx.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(40, audioCtx.currentTime + 0.1);
+
+        gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.1);
+    }
+
+    function playMergeSound() {
+        if (!audioCtx) initAudio();
+        const oscillator = audioCtx.createOscillator();
+        const gainNode = audioCtx.createGain();
+
+        oscillator.type = 'triangle';
+        oscillator.frequency.setValueAtTime(400, audioCtx.currentTime);
+        oscillator.frequency.exponentialRampToValueAtTime(800, audioCtx.currentTime + 0.15);
+
+        gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioCtx.destination);
+
+        oscillator.start();
+        oscillator.stop(audioCtx.currentTime + 0.15);
+    }
+
+    // ゲーム状態
+    let score = 0;
+    let currentNextIndex = Math.floor(Math.random() * 3);
+    let canDrop = true;
+    let isGameOver = false;
+    let gameOverTimer = null;
+    let ballAnimations = new Map(); // id -> spring state
+
+    // Matter.js 初期化
+    const engine = Engine.create();
+    const world = engine.world;
+    const container = document.getElementById('game-container');
+
+    const render = Render.create({
+        element: container,
+        engine: engine,
+        options: {
+            width: WIDTH,
+            height: HEIGHT,
+            wireframes: false,
+            background: 'transparent'
+        }
+    });
+
+    Render.run(render);
+    const runner = Runner.create();
+    Runner.run(runner, engine);
+
+    // 壁の作成
+    const wallOptions = { isStatic: true, restitution: 0.1, friction: 0.2, render: { visible: false } };
+    const walls = [
+        Bodies.rectangle(WIDTH / 2, HEIGHT + 10, WIDTH, 20, wallOptions), // 底
+        Bodies.rectangle(-10, HEIGHT / 2, 20, HEIGHT, wallOptions), // 左
+        Bodies.rectangle(WIDTH + 10, HEIGHT / 2, 20, HEIGHT, wallOptions) // 右
+    ];
+    Composite.add(world, walls);
+
+    // スコアとNextの更新関数
+    function updateScore(points) {
+        score += points;
+        document.getElementById('score-display').innerText = `Score: ${score}`;
+    }
+
+    function drawNext() {
+        const nextCanvas = document.getElementById('next-canvas');
+        const ctx = nextCanvas.getContext('2d');
+        const type = BALL_TYPES[currentNextIndex];
+        
+        ctx.clearRect(0, 0, 80, 80);
+        ctx.beginPath();
+        ctx.arc(40, 40, type.radius * 0.5, 0, Math.PI * 2);
+        ctx.fillStyle = type.color;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+    }
+
+    // 玉の落下処理
+    function dropBall(x) {
+        if (!canDrop || isGameOver) return;
+
+        canDrop = false;
+        const typeIndex = currentNextIndex;
+        const type = BALL_TYPES[typeIndex];
+
+        const clampedX = Math.max(type.radius, Math.min(WIDTH - type.radius, x));
+
+        const ball = Bodies.circle(clampedX, 50, type.radius, {
+            restitution: 0.15, // 桜井メソッド：反発を抑える
+            friction: 0.2,    // 桜井メソッド：少し摩擦を増やす
+            density: 0.001 * (typeIndex + 1), // サイズに応じて密度（質量）を少し変える
+            label: 'ball',
+            plugin: { level: typeIndex },
+            render: { fillStyle: type.color }
+        });
+
+        Composite.add(world, ball);
+        playDropSound();
+
+        currentNextIndex = Math.floor(Math.random() * 3);
+        drawNext();
+
+        setTimeout(() => {
+            if (!isGameOver) canDrop = true;
+        }, COOLDOWN);
+    }
+
+    // クリック/タップイベント
+    container.addEventListener('mousedown', (e) => {
+        const rect = container.getBoundingClientRect();
+        dropBall(e.clientX - rect.left);
+    });
+
+    container.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        const rect = container.getBoundingClientRect();
+        dropBall(e.touches[0].clientX - rect.left);
+    }, { passive: false });
+
+    // 衝突イベント（マージ）
+    Events.on(engine, 'collisionStart', (event) => {
+        const pairs = event.pairs;
+        pairs.forEach(pair => {
+            const bodyA = pair.bodyA;
+            const bodyB = pair.bodyB;
+
+            if (bodyA.label === 'ball' && bodyB.label === 'ball') {
+                const levelA = bodyA.plugin.level;
+                const levelB = bodyB.plugin.level;
+
+                if (levelA === levelB && levelA < BALL_TYPES.length - 1) {
+                    const nextLevel = levelA + 1;
+                    const nextType = BALL_TYPES[nextLevel];
+                    
+                    const midX = (bodyA.position.x + bodyB.position.x) / 2;
+                    const midY = (bodyA.position.y + bodyB.position.y) / 2;
+
+                    Composite.remove(world, [bodyA, bodyB]);
+                    ballAnimations.delete(bodyA.id);
+                    ballAnimations.delete(bodyB.id);
+
+                    const newBall = Bodies.circle(midX, midY, nextType.radius, {
+                        restitution: 0.15,
+                        friction: 0.2,
+                        density: 0.001 * (nextLevel + 1),
+                        label: 'ball',
+                        plugin: { level: nextLevel },
+                        render: { fillStyle: nextType.color }
+                    });
+
+                    Composite.add(world, newBall);
+                    updateScore(nextType.score);
+                    playMergeSound();
+
+                    // ぷるんアニメーション初期化
+                    ballAnimations.set(newBall.id, {
+                        scale: 0.0,
+                        velocity: 0.2,
+                        target: 1.0,
+                        stiffness: 0.2,
+                        damping: 0.8
+                    });
+                }
+            }
+        });
+    });
+
+    // 描画オーバーライド：ぷるんアニメーションの適用
+    Events.on(render, 'afterRender', () => {
+        const ctx = render.context;
+        const balls = Composite.allBodies(world).filter(b => b.label === 'ball');
+
+        ctx.save();
+        balls.forEach(ball => {
+            let anim = ballAnimations.get(ball.id);
+            let displayScale = 1.0;
+
+            if (anim) {
+                // バネ物理（Simple Harmonic Motion with damping）
+                const force = (anim.target - anim.scale) * anim.stiffness;
+                anim.velocity += force;
+                anim.velocity *= anim.damping;
+                anim.scale += anim.velocity;
+
+                displayScale = anim.scale;
+
+                // 収束判定
+                if (Math.abs(anim.target - anim.scale) < 0.001 && Math.abs(anim.velocity) < 0.001) {
+                    ballAnimations.delete(ball.id);
+                    displayScale = 1.0;
+                }
+            }
+
+            // Matter.jsの通常描画の上に、アニメーション用の円を重ねて描画
+            // 本来はRender.bodiesを拡張すべきだが、簡易化のため上書き
+            if (anim) {
+                const type = BALL_TYPES[ball.plugin.level];
+                ctx.beginPath();
+                ctx.arc(ball.position.x, ball.position.y, type.radius * displayScale, 0, Math.PI * 2);
+                ctx.fillStyle = type.color;
+                ctx.fill();
+                // 縁取り
+                ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        });
+        
+        // 限界ラインの描画
+        ctx.beginPath();
+        ctx.setLineDash([5, 5]);
+        ctx.moveTo(0, LIMIT_LINE_Y);
+        ctx.lineTo(WIDTH, LIMIT_LINE_Y);
+        ctx.strokeStyle = 'rgba(255, 0, 0, 0.5)';
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+    });
+
+    // ゲームオーバー判定
+    Events.on(engine, 'afterUpdate', () => {
+        if (isGameOver) return;
+
+        const balls = Composite.allBodies(world).filter(b => b.label === 'ball' && b.position.y > 100);
+        const isExceeding = balls.some(b => b.position.y - b.circleRadius < LIMIT_LINE_Y);
+
+        if (isExceeding) {
+            if (!gameOverTimer) {
+                gameOverTimer = setTimeout(() => {
+                    triggerGameOver();
+                }, 2000);
+            }
+        } else {
+            if (gameOverTimer) {
+                clearTimeout(gameOverTimer);
+                gameOverTimer = null;
+            }
+        }
+    });
+
+    function triggerGameOver() {
+        isGameOver = true;
+        Runner.stop(runner);
+        document.getElementById('game-over').style.display = 'flex';
+        document.getElementById('final-score').innerText = `Score: ${score}`;
+    }
+
+    drawNext();
+</script>
+
+</body>
+</html>
